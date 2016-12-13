@@ -19,16 +19,15 @@ git_webhook:
         events:
           type: string
           description: the github event type
-        wskhost:
+        endpoint:
           type: string
           description: the IP address of deployed OpenWhisk server
+        triggerName:
+          type: string
+          description: the trigger invoked by the call back
   feeds:
     webhook-feed:
-      location:
-      credential:
       action: webhook
   triggers:
-     webhook_trigger:
-      action: webhook
-
+     webhook-trigger:
 
