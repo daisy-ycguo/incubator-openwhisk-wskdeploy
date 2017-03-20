@@ -23,6 +23,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"io/ioutil"
+	"archive/zip"
 
 	"github.com/openwhisk/openwhisk-client-go/whisk"
 	"github.com/openwhisk/openwhisk-wskdeploy/parsers"
@@ -34,12 +36,13 @@ const FileSystemSourceDirectoryName = "actions"
 
 type FileSystemReader struct {
 	serviceDeployer *ServiceDeployer
+	tempDir		string
 }
 
 func NewFileSystemReader(serviceDeployer *ServiceDeployer) *FileSystemReader {
 	var reader FileSystemReader
 	reader.serviceDeployer = serviceDeployer
-
+	
 	return &reader
 }
 
@@ -84,7 +87,8 @@ func (reader *FileSystemReader) ReadProjectDirectory(manifest *parsers.ManifestY
 					}
 				}
 			} else if strings.HasPrefix(fpath, reader.serviceDeployer.ProjectPath+"/"+FileSystemSourceDirectoryName) {
-				fmt.Println("Searching directory " + filepath.Base(fpath) + " for action source code.")
+				fmt.Println("Zipping directory " + filepath.Base(fpath) + " for action source code.")
+				_, action, err := reader.CreateActionFromDir(reader.serviceDeployer.ManifestPath, fpath)
 			} else {
 				return filepath.SkipDir
 			}
@@ -100,6 +104,7 @@ func (reader *FileSystemReader) ReadProjectDirectory(manifest *parsers.ManifestY
 	return actions, nil
 
 }
+
 
 func (reader *FileSystemReader) CreateActionFromFile(manipath, filePath string) (string, *whisk.Action, error) {
 	ext := filepath.Ext(filePath)
@@ -135,6 +140,102 @@ func (reader *FileSystemReader) CreateActionFromFile(manipath, filePath string) 
 	}
 	// If the action is not supported, we better to return an error.
 	return "", nil, errors.New("Unsupported action type.")
+}
+
+/**
+This function will create an action with multiple files in a specific director.
+The director will be compressed as a zip file.
+The first meanful extension of those files under the directory will be used to decide the action type.
+**/
+func (reader *FileSystemReader) CreateActionFromDir(manipath, dir string) (string, *whisk.Action, error) {
+	//open the dir
+	baseName := filepath.Base(dir)
+	dirfile, err := os.Open(dir)
+	if err != nil {return "", nil, err}
+	dirfileinfo, err := dirfile.Stat()
+	if !dirfileinfo.IsDir() {return "", nil, errors.New(dir+" should be a directory.")}
+	defer dirfile.Close()
+	// get the first file extension as the action type
+	kind := ""
+	list, err := ioutil.ReadDir(dir)
+found:
+	for _, info := range list {
+		if !info.IsDir() {
+			filename := info.Name()
+			ext := filepath.Ext(filename)
+			switch ext {
+			case ".swift":
+				kind = "swift:default"
+				break found
+			case ".js":
+				kind = "nodejs:default"
+				break found
+			case ".py":
+				kind = "python"
+				break found
+			}
+		}
+	}
+	if len(kind)==0 { return "", nil, errors.New("Unsupported action type.") }
+
+	//create temp file
+	tempfile := filepath.Join(getTempDir(), baseName+".zip")
+	_, e := os.Stat(tempfile)
+	if e!=nil { os.Remove(tempfile) }
+	f,err := os.Create(tempfile)
+	//compress the directory to a temp file
+	err = compressDir(tempfile, dir)
+	if err!=nil { return "", nil, err }
+
+	//get the action type
+	action := new(whisk.Action)
+	dat, err := new(utils.ContentReader).LocalReader.ReadLocal(tempfile)
+	utils.Check(err)
+	action.Exec = new(whisk.Exec)
+	code := string(dat)
+	action.Exec.Code = &code
+	action.Exec.Kind = kind
+	action.Name = name
+	pub := false
+	action.Publish = &pub
+	return name, action, nil	// process source code files
+}
+
+func (reader *FileSystemReader) getTempDir() string {
+	if tempDir==nil {
+		tempDir = ioutil.TempDir("","wskdeploy_temp")
+	}
+	return tempDir
+}
+
+func (reader *FileSystemReader) compressDir(destfile string, dirpath string) error {
+	zipFile, _ := os.Create(destfile)
+	defer zipFile.Close()
+	myzip := zip.NewWriter(zipFile)
+	defer myzip.Close()
+
+	visit:=func(path string, f os.FileInfo, err error) error {
+                if ( f == nil ) {return err}
+                if f.IsDir() {
+			return nil
+		}
+
+                thisfile, _ := os.Open(path)
+		defer thisfile.Close()
+		header, err := zip.FileInfoHeader(f)
+		header.Name, _ = filepath.Rel(filepath.Dir(root), path)
+		writer, err := myzip.CreateHeader(header)
+		_, err = io.Copy(writer, thisfile)
+		return err
+        }
+
+        err := filepath.Walk(dirpath, visit)
+        if err != nil {
+                fmt.Printf("filepath.Walk() returned %v\n", err)
+		return err
+        }
+	myzip.Flush()
+	return nil
 }
 
 func (reader *FileSystemReader) getFilePathCount(path string) (int, error) {
